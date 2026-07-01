@@ -1,6 +1,28 @@
+cargo-features = ["profile-rustflags"]
+
 [package]
-name = "bootloader"
+name = "aarch64-bootloader"
 version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+uefi = { version = "0.37.0", features = [
+    "global_allocator",
+    "alloc",
+    "logger",
+    "panic_handler",
+] }
+aarch64-cpu = "11.2.0"
+bootloader-api = { path = "../bootloader-api" }
+goblin = { version = "0.10.7", default-features = false, features = [
+    "elf64",
+    "elf32",
+    "endian_fd",
+    "alloc",
+] }
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
