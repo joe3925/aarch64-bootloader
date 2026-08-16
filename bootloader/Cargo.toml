@@ -14,6 +14,7 @@ uefi = { version = "0.37.0", features = [
 ] }
 aarch64-cpu = "11.2.0"
 bootloader-api = { path = "../bootloader-api" }
+aarch64-vmsa = { git = "https://github.com/joe3925/aarch64-vmsa.git" }
 goblin = { version = "0.10.7", default-features = false, features = [
     "elf64",
     "elf32",
