@@ -88,6 +88,57 @@ pub struct UefiTablePool<G: TranslationGranule> {
     _granule: PhantomData<G>,
 }
 
+pub struct FixedTablePool<G: TranslationGranule> {
+    chunk: PoolChunk,
+    _granule: PhantomData<G>,
+}
+
+impl<G: TranslationGranule> FixedTablePool<G> {
+    pub fn new(table_count: usize) -> Result<Self, MapperError> {
+        let usable = (G::SIZE as usize)
+            .checked_mul(table_count)
+            .ok_or(MapperError::NoMemory)?;
+        let allocation_bytes = usable
+            .checked_add(G::SIZE as usize - 1)
+            .ok_or(MapperError::NoMemory)?;
+        let pages = allocation_bytes.div_ceil(boot::PAGE_SIZE);
+        let allocation =
+            boot::allocate_pages(AllocateType::AnyPages, MemoryType::LOADER_DATA, pages)
+                .map_err(|_| MapperError::NoMemory)?;
+        let allocation_base = allocation.as_ptr() as u64;
+        let base = allocation_base
+            .checked_add(G::SIZE - 1)
+            .ok_or(MapperError::NoMemory)?
+            & !(G::SIZE - 1);
+        unsafe { core::ptr::write_bytes(base as *mut u8, 0, usable) };
+        Ok(Self {
+            chunk: PoolChunk {
+                base,
+                bytes: usable,
+                used: 0,
+            },
+            _granule: PhantomData,
+        })
+    }
+}
+
+unsafe impl<G: TranslationGranule> TableFrameProvider<G> for FixedTablePool<G> {
+    type Error = MapperError;
+
+    fn allocate_zeroed_table(
+        &mut self,
+        layout: TableAllocLayout,
+    ) -> Result<TableAddr<G>, Self::Error> {
+        let addr = UefiTablePool::<G>::allocate_from_chunk(&mut self.chunk, layout)
+            .ok_or(MapperError::NoMemory)?;
+        TableAddr::new(addr).map_err(|_| MapperError::InvalidGeometry)
+    }
+
+    fn reclaim_table(&mut self, _reclaim: TableReclaim<G>) -> Result<(), Self::Error> {
+        Ok(())
+    }
+}
+
 impl<G: TranslationGranule> UefiTablePool<G> {
     pub const fn new() -> Self {
         Self {
@@ -247,7 +298,7 @@ impl install_format_private::Sealed for Vmsa64 {}
 impl InstallableDescriptorFormat for Vmsa64 {
     const USES_D128: bool = false;
     fn configure_tcr(tcr: &mut u64) {
-        *tcr &= !(1 << 59); // TCR_EL1.DS: ordinary VMSAv8-64 descriptors.
+        *tcr &= !(1 << 59);
     }
 }
 
@@ -255,7 +306,7 @@ impl install_format_private::Sealed for Vmsa64Lpa2 {}
 impl InstallableDescriptorFormat for Vmsa64Lpa2 {
     const USES_D128: bool = false;
     fn configure_tcr(tcr: &mut u64) {
-        *tcr |= 1 << 59; // TCR_EL1.DS: LPA2 descriptor layout.
+        *tcr |= 1 << 59;
     }
 }
 
@@ -449,6 +500,36 @@ where
     P: TableFrameProvider<G>,
     Vmsa64: HasLayout<<NonSecureEl1Stage1 as aarch64_vmsa::regime::TranslationRegime>::Stage, G>,
 {
+    pub fn install_recursive_mapping(&mut self, index: usize) -> Result<u64, MapperError> {
+        let root = self.root();
+        if index >= TableGeometry::<Vmsa64, G>::entries() {
+            return Err(MapperError::InvalidGeometry);
+        }
+        let mut base = 0u64;
+        let mut level = root.level();
+        loop {
+            base |= (index as u64) << TableGeometry::<Vmsa64, G>::level_shift(level);
+            if level == Vmsa64::FINAL_LEVEL {
+                break;
+            }
+            level = level.next();
+        }
+        let sign_bit = 1u64 << (root.addr_bits() - 1);
+        if base & sign_bit != 0 {
+            base |= !((1u64 << root.addr_bits()) - 1);
+        }
+        let root_entry = unsafe { (root.addr().raw() as *const u64).add(index).read_volatile() };
+        if root_entry != Vmsa64::invalid() {
+            return Err(MapperError::InvalidGeometry);
+        }
+        unsafe {
+            (root.addr().raw() as *mut u64)
+                .add(index)
+                .write_volatile(root.addr().raw() | 0b11)
+        };
+        Ok(base)
+    }
+
     pub fn map_kernel_range<C>(
         &mut self,
         config: &C,
