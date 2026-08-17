@@ -13,6 +13,7 @@ uefi = { version = "0.37.0", features = [
     "panic_handler",
 ] }
 aarch64-cpu = "11.2.0"
+tock-registers = "0.10.1"
 bootloader-api = { path = "../bootloader-api" }
 aarch64-vmsa = { git = "https://github.com/joe3925/aarch64-vmsa.git" }
 goblin = { version = "0.10.7", default-features = false, features = [

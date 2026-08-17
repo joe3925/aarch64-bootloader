@@ -9,7 +9,9 @@ pub mod kernel_loading;
 pub mod mapper;
 use crate::file::read_file;
 use crate::kernel_loading::{load_kernel_at_preferred_virtual_address, validate_kernel};
-use crate::mapper::BootMapper;
+use crate::mapper::{BootConfig as MapperConfig, BootPlanner};
+use aarch64_vmsa::config::format::Vmsa64;
+use aarch64_vmsa::config::granule::Granule4KiB;
 use bootloader_api::BootConfig;
 use bootloader_api::cfg::{CfgFile, FromCfg};
 use core::ffi::c_void;
@@ -61,7 +63,6 @@ fn init() -> Result<(), BootError> {
             }
         }
     });
-
     let fs = boot::get_image_file_system(boot::image_handle())
         .map_err(|_| BootError::ImageFileSystem)?;
 
@@ -78,9 +79,11 @@ fn init() -> Result<(), BootError> {
     let kernel = Elf::parse(&kernel_binary).map_err(|_| BootError::KernelParse)?;
 
     validate_kernel(&kernel).map_err(|_| BootError::KernelInvalid)?;
-    let mut mapper = BootMapper {};
+    let mut mapper = BootPlanner::<Vmsa64, Granule4KiB>::new(MapperConfig::default(), 48, 48)
+        .map_err(|_| BootError::MapperInit)?;
+    let (mapping, mapping_config) = mapper.mapping_parts_mut();
     let loaded_kernel =
-        load_kernel_at_preferred_virtual_address(&kernel, &kernel_binary, &mut mapper)
+        load_kernel_at_preferred_virtual_address(&kernel, &kernel_binary, mapping, mapping_config)
             .map_err(|_| BootError::KernelLoad)?;
     Ok(())
 }
@@ -97,6 +100,7 @@ enum BootError {
     KernelParse,
     KernelInvalid,
     KernelLoad,
+    MapperInit,
 }
 
 impl BootError {
@@ -112,6 +116,7 @@ impl BootError {
             Self::KernelParse => Status::LOAD_ERROR,
             Self::KernelInvalid => Status::LOAD_ERROR,
             Self::KernelLoad => Status::LOAD_ERROR,
+            Self::MapperInit => Status::OUT_OF_RESOURCES,
         }
     }
 }

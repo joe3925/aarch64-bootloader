@@ -1,6 +1,13 @@
 extern crate alloc;
 
-use crate::mapper::KernelMapper;
+use crate::mapper::{MapperError, MappingPrimitive};
+use aarch64_vmsa::address::TranslationGranule;
+use aarch64_vmsa::attrs::{Stage1MemoryConfig, Stage1PermissionConfig};
+use aarch64_vmsa::config::format::Vmsa64;
+use aarch64_vmsa::config::regime::NonSecureEl1Stage1;
+use aarch64_vmsa::descriptor::HasLayout;
+use aarch64_vmsa::mapper::Offline;
+use aarch64_vmsa::table::{TableAccessMut, TableFrameProvider};
 use alloc::vec::Vec;
 use core::cmp;
 use core::ptr;
@@ -49,30 +56,41 @@ pub enum KernelLoadError<MapError> {
     MappingFailed(MapError),
 }
 
-pub fn load_kernel_at_preferred_virtual_address<M>(
+pub fn load_kernel_at_preferred_virtual_address<G, A, P, C>(
     kernel: &Elf,
     kernel_bytes: &[u8],
-    mapper: &mut M,
-) -> Result<LoadedKernel, KernelLoadError<M::Error>>
+    mapper: &mut MappingPrimitive<Vmsa64, G, A, P, Offline>,
+    config: &C,
+) -> Result<LoadedKernel, KernelLoadError<MapperError>>
 where
-    M: KernelMapper,
+    G: TranslationGranule,
+    A: TableAccessMut<Vmsa64, G>,
+    P: TableFrameProvider<G>,
+    C: Stage1MemoryConfig + Stage1PermissionConfig,
+    Vmsa64: HasLayout<<NonSecureEl1Stage1 as aarch64_vmsa::regime::TranslationRegime>::Stage, G>,
 {
     load_kernel_at_preferred_virtual_address_with_va_bits(
         kernel,
         kernel_bytes,
         mapper,
+        config,
         DEFAULT_VA_BITS,
     )
 }
 
-pub fn load_kernel_at_preferred_virtual_address_with_va_bits<M>(
+pub fn load_kernel_at_preferred_virtual_address_with_va_bits<G, A, P, C>(
     kernel: &Elf,
     kernel_bytes: &[u8],
-    mapper: &mut M,
+    mapper: &mut MappingPrimitive<Vmsa64, G, A, P, Offline>,
+    config: &C,
     va_bits: u32,
-) -> Result<LoadedKernel, KernelLoadError<M::Error>>
+) -> Result<LoadedKernel, KernelLoadError<MapperError>>
 where
-    M: KernelMapper,
+    G: TranslationGranule,
+    A: TableAccessMut<Vmsa64, G>,
+    P: TableFrameProvider<G>,
+    C: Stage1MemoryConfig + Stage1PermissionConfig,
+    Vmsa64: HasLayout<<NonSecureEl1Stage1 as aarch64_vmsa::regime::TranslationRegime>::Stage, G>,
 {
     let mut segments = Vec::new();
     let mut virt_base = u64::MAX;
@@ -140,7 +158,7 @@ where
         let perms = segment_perms(ph.p_flags);
 
         mapper
-            .map_kernel_range(virt_page, phys_page, mapped_size, perms)
+            .map_kernel_range(config, virt_page, phys_page, mapped_size, perms)
             .map_err(KernelLoadError::MappingFailed)?;
 
         segments.push(LoadedSegment {
