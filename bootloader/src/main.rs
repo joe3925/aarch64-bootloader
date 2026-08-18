@@ -32,7 +32,7 @@ use uefi::proto::media::fs::SimpleFileSystem;
 use uefi::system::with_config_table;
 use uefi::table::cfg::ConfigTableEntry;
 
-const CFG_PATH: &str = "/EFI/BOOT/boot.cfg";
+const CFG_PATH: &str = env!("RUSTOS_BOOT_CONFIG_PATH");
 const EFI_DTB_TABLE_GUID: Guid = guid!("b1b621d5-f19c-41a5-830b-d9152c69aae0");
 const RECURSIVE_INDEX: usize = 510;
 #[entry]
