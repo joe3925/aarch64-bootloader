@@ -4,3 +4,5 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+aarch64-cpu = "11.2.0"
+aarch64-vmsa = { git = "https://github.com/joe3925/aarch64-vmsa.git" }

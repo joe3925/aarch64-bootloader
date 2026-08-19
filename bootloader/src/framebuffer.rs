@@ -15,8 +15,10 @@ pub enum FrameBufferError {
 }
 
 pub fn framebuffer(config: &FrameBufferConfig) -> Result<FrameBuffer, FrameBufferError> {
-    let handle = boot::get_handle_for_protocol::<GraphicsOutput>()
-        .map_err(|_| FrameBufferError::GraphicsOutputNotFound)?;
+    let handle = match boot::get_handle_for_protocol::<GraphicsOutput>() {
+        Ok(handle) => handle,
+        Err(_) => return Err(FrameBufferError::GraphicsOutputNotFound),
+    };
     let mut gop = boot::open_protocol_exclusive::<GraphicsOutput>(handle)
         .map_err(|_| FrameBufferError::GraphicsOutputOpen)?;
 

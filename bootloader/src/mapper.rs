@@ -1,13 +1,12 @@
 extern crate alloc;
 
-use alloc::vec::Vec;
 use core::arch::asm;
 use core::marker::PhantomData;
 use core::ptr::NonNull;
 
 use aarch64_cpu::asm::barrier::{ISH, ISHST, SY, dsb, isb};
 use aarch64_cpu::registers::{MAIR_EL1, TCR_EL1, TCR2_EL1, TTBR1_EL1};
-use aarch64_vmsa::address::{GranuleKind, Level, PhysAddr, TranslationGranule};
+use aarch64_vmsa::address::{GranuleKind, Level, TranslationGranule};
 use aarch64_vmsa::arch::{Capability, VmsaFeatures};
 use aarch64_vmsa::attrs::{
     AllocationHints, CachePolicy, Cacheability, DataAccess, DirtyBitManagement, DirtyControl,
@@ -25,7 +24,7 @@ use aarch64_vmsa::table::{
     TableAllocLayout, TableFrameProvider, TableGeometry, TableReclaim, TableShape,
     TranslationTable, TranslationTableMut,
 };
-use aarch64_vmsa::translation::WalkInputAddr;
+use aarch64_vmsa::translation::{WalkInputAddr, WalkOutputAddr};
 use tock_registers::interfaces::{Readable, Writeable};
 use uefi::boot::{self, AllocateType};
 use uefi::mem::memory_map::MemoryType;
@@ -37,6 +36,7 @@ pub enum MapperError {
     NullTable,
     NoMemory,
     InvalidGeometry,
+    InvalidInputAddress,
     UnsupportedPhysicalAddressWidth(u8),
     UnsupportedDescriptorFormat,
 }
@@ -77,85 +77,32 @@ unsafe impl<F: DescriptorFormat, G: TranslationGranule> TableAccessMut<F, G>
     }
 }
 
-struct PoolChunk {
-    base: u64,
-    bytes: usize,
-    used: usize,
-}
-
 pub struct UefiTablePool<G: TranslationGranule> {
-    chunks: Vec<PoolChunk>,
     _granule: PhantomData<G>,
 }
 
-pub struct FixedTablePool<G: TranslationGranule> {
-    chunk: PoolChunk,
-    _granule: PhantomData<G>,
-}
+pub struct UnavailableTableProvider;
 
-impl<G: TranslationGranule> FixedTablePool<G> {
-    pub fn new(table_count: usize) -> Result<Self, MapperError> {
-        let usable = (G::SIZE as usize)
-            .checked_mul(table_count)
-            .ok_or(MapperError::NoMemory)?;
-        let allocation_bytes = usable
-            .checked_add(G::SIZE as usize - 1)
-            .ok_or(MapperError::NoMemory)?;
-        let pages = allocation_bytes.div_ceil(boot::PAGE_SIZE);
-        let allocation =
-            boot::allocate_pages(AllocateType::AnyPages, MemoryType::LOADER_DATA, pages)
-                .map_err(|_| MapperError::NoMemory)?;
-        let allocation_base = allocation.as_ptr() as u64;
-        let base = allocation_base
-            .checked_add(G::SIZE - 1)
-            .ok_or(MapperError::NoMemory)?
-            & !(G::SIZE - 1);
-        unsafe { core::ptr::write_bytes(base as *mut u8, 0, usable) };
-        Ok(Self {
-            chunk: PoolChunk {
-                base,
-                bytes: usable,
-                used: 0,
-            },
-            _granule: PhantomData,
-        })
-    }
-}
-
-unsafe impl<G: TranslationGranule> TableFrameProvider<G> for FixedTablePool<G> {
+unsafe impl<G: TranslationGranule> TableFrameProvider<G> for UnavailableTableProvider {
     type Error = MapperError;
 
     fn allocate_zeroed_table(
         &mut self,
-        layout: TableAllocLayout,
+        _layout: TableAllocLayout,
     ) -> Result<TableAddr<G>, Self::Error> {
-        let addr = UefiTablePool::<G>::allocate_from_chunk(&mut self.chunk, layout)
-            .ok_or(MapperError::NoMemory)?;
-        TableAddr::new(addr).map_err(|_| MapperError::InvalidGeometry)
+        Err(MapperError::NoMemory)
     }
 
     fn reclaim_table(&mut self, _reclaim: TableReclaim<G>) -> Result<(), Self::Error> {
-        Ok(())
+        Err(MapperError::NoMemory)
     }
 }
 
 impl<G: TranslationGranule> UefiTablePool<G> {
     pub const fn new() -> Self {
         Self {
-            chunks: Vec::new(),
             _granule: PhantomData,
         }
-    }
-
-    fn allocate_from_chunk(chunk: &mut PoolChunk, layout: TableAllocLayout) -> Option<u64> {
-        let align = layout.align() as usize;
-        let start = chunk.used.checked_add(align - 1)? & !(align - 1);
-        let end = start.checked_add(layout.bytes() as usize)?;
-        if end > chunk.bytes {
-            return None;
-        }
-        chunk.used = end;
-        Some(chunk.base + start as u64)
     }
 }
 
@@ -166,16 +113,8 @@ unsafe impl<G: TranslationGranule> TableFrameProvider<G> for UefiTablePool<G> {
         &mut self,
         layout: TableAllocLayout,
     ) -> Result<TableAddr<G>, Self::Error> {
-        if let Some(addr) = self
-            .chunks
-            .last_mut()
-            .and_then(|c| Self::allocate_from_chunk(c, layout))
-        {
-            return TableAddr::new(addr).map_err(|_| MapperError::InvalidGeometry);
-        }
-        let wanted = core::cmp::max(G::SIZE as usize * 16, layout.bytes() as usize);
-        let allocation_bytes = wanted
-            .checked_add(G::SIZE as usize - 1)
+        let allocation_bytes = (layout.bytes() as usize)
+            .checked_add(layout.align() as usize - 1)
             .ok_or(MapperError::NoMemory)?;
         let pages = allocation_bytes.div_ceil(boot::PAGE_SIZE);
         let allocation =
@@ -183,22 +122,13 @@ unsafe impl<G: TranslationGranule> TableFrameProvider<G> for UefiTablePool<G> {
                 .map_err(|_| MapperError::NoMemory)?;
         let allocation_base = allocation.as_ptr() as u64;
         let base = allocation_base
-            .checked_add(G::SIZE - 1)
+            .checked_add(layout.align() - 1)
             .ok_or(MapperError::NoMemory)?
-            & !(G::SIZE - 1);
-        let skipped = (base - allocation_base) as usize;
-        let mut chunk = PoolChunk {
-            base,
-            bytes: pages * boot::PAGE_SIZE - skipped,
-            used: 0,
-        };
+            & !(layout.align() - 1);
         unsafe {
-            core::ptr::write_bytes(chunk.base as *mut u8, 0, chunk.bytes);
+            core::ptr::write_bytes(base as *mut u8, 0, layout.bytes() as usize);
         }
-        let addr =
-            Self::allocate_from_chunk(&mut chunk, layout).ok_or(MapperError::InvalidGeometry)?;
-        self.chunks.push(chunk);
-        TableAddr::new(addr).map_err(|_| MapperError::InvalidGeometry)
+        TableAddr::new(base).map_err(|_| MapperError::InvalidGeometry)
     }
 
     fn reclaim_table(&mut self, _reclaim: TableReclaim<G>) -> Result<(), Self::Error> {
@@ -359,7 +289,7 @@ where
         new_access: A,
         new_frames: P,
         invalidation: I,
-    ) -> Result<MappingPrimitive<F, G, A, P, Live<I>>, MapperError>
+    ) -> Result<(), MapperError>
     where
         F: SupportsLiveDescriptorIo + InstallableDescriptorFormat,
         A: TableAccessMut<F, G>,
@@ -371,7 +301,8 @@ where
         if !features.verify(F::REQUIRED_FEATURES) {
             return Err(MapperError::UnsupportedDescriptorFormat);
         }
-        let root = self.mapper.into_parts().0;
+        let (root, _, frames) = self.mapper.into_parts();
+        core::mem::forget(frames);
         let ips = match root.output_addr_bits() {
             32 => 0,
             36 => 1,
@@ -389,6 +320,12 @@ where
         };
         let mut tcr = TCR_EL1.get();
         const TTBR1_MASK: u64 = (0x7 << 32)
+            | (1 << 38)
+            | (1 << 42)
+            | (1 << 51)
+            | (1 << 54)
+            | (1 << 56)
+            | (1 << 57)
             | (0x3 << 30)
             | (0x3 << 28)
             | (0x3 << 26)
@@ -401,31 +338,27 @@ where
             | ((self.config.table_walk_shareability() as u64) << 28)
             | ((self.config.table_walk_outer_cacheability() as u64) << 26)
             | ((self.config.table_walk_inner_cacheability() as u64) << 24)
+            | (1 << 22)
             | ((64u64 - root.addr_bits() as u64) << 16);
         F::configure_tcr(&mut tcr);
-        let tcr2 = features.status(Capability::D128).is_implemented().then(|| {
-            let value = TCR2_EL1.get();
-            if F::USES_D128 {
-                value | (1 << 5)
-            } else {
-                value & !(1 << 5)
-            }
-        });
+        let tcr2 = F::USES_D128.then(|| TCR2_EL1.get() | (1 << 5));
         dsb(ISHST);
+        unsafe {
+            asm!("tlbi vmalle1", options(nostack, preserves_flags));
+        }
+        dsb(ISH);
+        isb(SY);
         MAIR_EL1.set(self.config.mair());
         if let Some(tcr2) = tcr2 {
             TCR2_EL1.set(tcr2);
         }
         TCR_EL1.set(tcr);
-        TTBR1_EL1.set_baddr(root.addr().raw());
+        TTBR1_EL1.set(root.addr().raw() | (1 << 48));
         isb(SY);
-        unsafe {
-            asm!("tlbi vmalle1is", options(nostack, preserves_flags));
-        }
-        dsb(ISH);
-        isb(SY);
-        MappingPrimitive::create_online(root, new_access, new_frames, invalidation)
-            .map_err(|_| MapperError::InvalidGeometry)
+        core::mem::forget(new_access);
+        core::mem::forget(new_frames);
+        core::mem::forget(invalidation);
+        Ok(())
     }
 }
 
@@ -446,7 +379,7 @@ unsafe impl<G: TranslationGranule> MapperInvalidation<Vmsa64, G> for BootMapperI
     fn synchronize(&mut self) {
         dsb(ISHST);
         unsafe {
-            asm!("tlbi vmalle1is", options(nostack, preserves_flags));
+            asm!("tlbi vmalle1", options(nostack, preserves_flags));
         }
         dsb(ISH);
         isb(SY);
@@ -468,7 +401,7 @@ pub struct BootConfig {
 impl Default for BootConfig {
     fn default() -> Self {
         Self {
-            mair: 0xff,
+            mair: MAIR_EL1.get(),
             table_walk_shareability: 0b11,
             table_walk_outer_cacheability: 0b01,
             table_walk_inner_cacheability: 0b01,
@@ -525,7 +458,7 @@ where
         unsafe {
             (root.addr().raw() as *mut u64)
                 .add(index)
-                .write_volatile(root.addr().raw() | 0b11)
+                .write_volatile(root.addr().raw() | 0b11 | (3 << 2) | (3 << 8) | (1 << 10))
         };
         Ok(base)
     }
@@ -540,6 +473,8 @@ where
     ) -> Result<(), MapperError>
     where
         C: Stage1MemoryConfig + Stage1PermissionConfig,
+        A::Error: core::fmt::Debug,
+        P::Error: core::fmt::Debug,
     {
         assert_eq!(virt_start % G::SIZE, 0);
         assert_eq!(phys_start % G::SIZE, 0);
@@ -585,20 +520,29 @@ where
                 unprivileged_execute_limit: false,
             },
             pas: (),
-            controls: SemanticVmsa64Stage1TableControls::default(),
+            controls: SemanticVmsa64Stage1TableControls {
+                access_flag: true,
+                software: SoftwareMetadata::new(0),
+            },
         };
         let mut off = 0;
         while off < byte_len {
+            let input =
+                WalkInputAddr::from_canonical(virt_start + off, self.inner.root().addr_bits())
+                    .map_err(|_| MapperError::InvalidInputAddress)?;
             self.inner
                 .map_semantic_leaf(
                     config,
-                    WalkInputAddr::new(virt_start + off),
-                    PhysAddr(phys_start + off),
+                    input,
+                    WalkOutputAddr::new(phys_start + off),
                     F_L3,
                     leaf,
                     table,
                 )
-                .map_err(|_| MapperError::InvalidGeometry)?;
+                .map_err(|error| {
+                    uefi::println!("AArch64 mapping error: {error:?}");
+                    MapperError::InvalidGeometry
+                })?;
             off += G::SIZE;
         }
         Ok(())

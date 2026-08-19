@@ -11,6 +11,7 @@ use aarch64_vmsa::table::{TableAccessMut, TableFrameProvider};
 use alloc::vec::Vec;
 use core::cmp;
 use core::ptr;
+use core::arch::asm;
 use goblin::elf::Elf;
 use goblin::elf::program_header;
 use goblin::elf64::header;
@@ -65,7 +66,9 @@ pub fn load_kernel_at_preferred_virtual_address<G, A, P, C>(
 where
     G: TranslationGranule,
     A: TableAccessMut<Vmsa64, G>,
+    A::Error: core::fmt::Debug,
     P: TableFrameProvider<G>,
+    P::Error: core::fmt::Debug,
     C: Stage1MemoryConfig + Stage1PermissionConfig,
     Vmsa64: HasLayout<<NonSecureEl1Stage1 as aarch64_vmsa::regime::TranslationRegime>::Stage, G>,
 {
@@ -88,7 +91,9 @@ pub fn load_kernel_at_preferred_virtual_address_with_va_bits<G, A, P, C>(
 where
     G: TranslationGranule,
     A: TableAccessMut<Vmsa64, G>,
+    A::Error: core::fmt::Debug,
     P: TableFrameProvider<G>,
+    P::Error: core::fmt::Debug,
     C: Stage1MemoryConfig + Stage1PermissionConfig,
     Vmsa64: HasLayout<<NonSecureEl1Stage1 as aarch64_vmsa::regime::TranslationRegime>::Stage, G>,
 {
@@ -152,6 +157,18 @@ where
                 kernel_bytes[file_start..file_end].as_ptr(),
                 copy_dst as *mut u8,
                 file_size,
+            );
+            let mut cache_line = phys_page & !63;
+            while cache_line < phys_page + mapped_size {
+                asm!("dc cvau, {address}", address = in(reg) cache_line, options(nostack, preserves_flags));
+                cache_line += 64;
+            }
+            asm!(
+                "dsb ish",
+                "ic iallu",
+                "dsb ish",
+                "isb",
+                options(nostack, preserves_flags)
             );
         }
 
