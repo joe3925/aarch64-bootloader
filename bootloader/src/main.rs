@@ -131,6 +131,9 @@ fn init() -> Result<(), BootError> {
     let stub_stack = boot::allocate_pages(AllocateType::AnyPages, MemoryType::LOADER_DATA, 16)
         .map_err(|_| BootError::TransitionMapping)?;
     let stub_stack_top = stub_stack.as_ptr() as u64 + 16 * boot::PAGE_SIZE as u64;
+    let kernel_stack = boot::allocate_pages(AllocateType::AnyPages, MemoryType::LOADER_DATA, 256)
+        .map_err(|_| BootError::TransitionMapping)?;
+    let kernel_stack_top = kernel_stack.as_ptr() as u64 + 256 * boot::PAGE_SIZE as u64;
 
     let memory_map =
         boot::memory_map(MemoryType::LOADER_DATA).map_err(|_| BootError::TransitionMapping)?;
@@ -250,7 +253,14 @@ fn init() -> Result<(), BootError> {
             scratch_descriptor: scratch_descriptor as *mut u64,
         },
     };
-    unsafe { enter_stub(loaded_kernel.virt_entry, &boot_info, stub_stack_top) }
+    unsafe {
+        enter_stub(
+            loaded_kernel.virt_entry,
+            &boot_info,
+            stub_stack_top,
+            kernel_stack_top,
+        )
+    }
 }
 
 pub(crate) fn debug_message(message: &str) {
@@ -278,12 +288,18 @@ fn recursive_descriptor(recursive_base: u64, virtual_address: u64) -> u64 {
         | (l3 * core::mem::size_of::<u64>() as u64)
 }
 
-unsafe fn enter_stub(entry: u64, boot_info: *const BootInfo, stack_top: u64) -> ! {
+unsafe fn enter_stub(
+    entry: u64,
+    boot_info: *const BootInfo,
+    stack_top: u64,
+    kernel_stack_top: u64,
+) -> ! {
     unsafe {
         asm!(
             "mov sp, {stack_top}",
             "br {entry}",
             in("x0") boot_info,
+            in("x1") kernel_stack_top,
             entry = in(reg) entry,
             stack_top = in(reg) stack_top,
             options(noreturn)
