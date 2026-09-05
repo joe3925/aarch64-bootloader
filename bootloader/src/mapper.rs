@@ -9,8 +9,8 @@ use aarch64_cpu::registers::{MAIR_EL1, TCR_EL1, TCR2_EL1, TTBR1_EL1};
 use aarch64_vmsa::address::{GranuleKind, Level, TranslationGranule};
 use aarch64_vmsa::arch::{Capability, VmsaFeatures};
 use aarch64_vmsa::attrs::{
-    AllocationHints, CachePolicy, Cacheability, DataAccess, DirtyBitManagement, DirtyControl,
-    MemoryAttributes, MemoryTransience, SemanticLeafAttrs, SemanticTableAttrs,
+    AllocationHints, CachePolicy, Cacheability, DataAccess, DeviceMemoryType, DirtyBitManagement,
+    DirtyControl, MemoryAttributes, MemoryTransience, SemanticLeafAttrs, SemanticTableAttrs,
     SemanticVmsa64Stage1LeafControls, SemanticVmsa64Stage1TableControls, Shareability,
     SoftwareMetadata, Stage1EffectivePermissions, Stage1MemoryConfig, Stage1PermissionConfig,
     TwoPrivilegeTablePermissionLimits,
@@ -39,6 +39,12 @@ pub enum MapperError {
     InvalidInputAddress,
     UnsupportedPhysicalAddressWidth(u8),
     UnsupportedDescriptorFormat,
+}
+
+#[derive(Clone, Copy)]
+pub enum MappingKind {
+    Normal,
+    Device,
 }
 
 pub struct IdentityTableAccess<F: DescriptorFormat, G: TranslationGranule>(PhantomData<(F, G)>);
@@ -470,6 +476,7 @@ where
         phys_start: u64,
         byte_len: u64,
         perms: SegmentPerms,
+        kind: MappingKind,
     ) -> Result<(), MapperError>
     where
         C: Stage1MemoryConfig + Stage1PermissionConfig,
@@ -485,9 +492,14 @@ where
             allocation: AllocationHints::ReadWriteAllocate,
         };
         let leaf = SemanticLeafAttrs::<Vmsa64, NonSecureEl1Stage1> {
-            memory: MemoryAttributes::Normal {
-                inner: wb,
-                outer: wb,
+            memory: match kind {
+                MappingKind::Normal => MemoryAttributes::Normal {
+                    inner: wb,
+                    outer: wb,
+                },
+                MappingKind::Device => {
+                    MemoryAttributes::Device(DeviceMemoryType::NonGatheringNonReorderingNoEarlyAck)
+                }
             },
             permissions: Stage1EffectivePermissions {
                 privileged_data: if perms.write {
@@ -503,7 +515,10 @@ where
             },
             pas: (),
             controls: SemanticVmsa64Stage1LeafControls {
-                shareability: Shareability::InnerShareable,
+                shareability: match kind {
+                    MappingKind::Normal => Shareability::InnerShareable,
+                    MappingKind::Device => Shareability::OuterShareable,
+                },
                 access_flag: true,
                 global: true,
                 dirty: DirtyControl::Direct(DirtyBitManagement::SoftwareManaged),
@@ -515,7 +530,7 @@ where
         let table = SemanticTableAttrs::<Vmsa64, NonSecureEl1Stage1> {
             permission_limits: TwoPrivilegeTablePermissionLimits {
                 privileged_data_limit: DataAccess::ReadWrite,
-                unprivileged_data_limit: DataAccess::None,
+                unprivileged_data_limit: DataAccess::ReadWrite,
                 privileged_execute_limit: true,
                 unprivileged_execute_limit: false,
             },

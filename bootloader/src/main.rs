@@ -189,6 +189,19 @@ fn init() -> Result<(), BootError> {
             root_table,
             Granule4KiB::SIZE,
             data_permissions(),
+            crate::mapper::MappingKind::Normal,
+        )
+        .map_err(|_| BootError::TransitionMapping)?;
+    mapper
+        .mapping_parts_mut()
+        .0
+        .map_kernel_range(
+            &MapperConfig::default(),
+            0x0900_0000,
+            0x0900_0000,
+            Granule4KiB::SIZE,
+            data_permissions(),
+            crate::mapper::MappingKind::Device,
         )
         .map_err(|_| BootError::TransitionMapping)?;
     let recursive_access = unsafe {
@@ -324,7 +337,14 @@ fn map_transition_part(
         return Ok(());
     }
     mapping
-        .map_kernel_range(config, start, start, end - start, permissions)
+        .map_kernel_range(
+            config,
+            start,
+            start,
+            end - start,
+            permissions,
+            crate::mapper::MappingKind::Normal,
+        )
         .map_err(|_| BootError::TransitionMapping)
 }
 

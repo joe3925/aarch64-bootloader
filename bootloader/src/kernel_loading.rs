@@ -175,7 +175,14 @@ where
         let perms = segment_perms(ph.p_flags);
 
         mapper
-            .map_kernel_range(config, virt_page, phys_page, mapped_size, perms)
+            .map_kernel_range(
+                config,
+                virt_page,
+                phys_page,
+                mapped_size,
+                perms,
+                crate::mapper::MappingKind::Normal,
+            )
             .map_err(KernelLoadError::MappingFailed)?;
 
         segments.push(LoadedSegment {
