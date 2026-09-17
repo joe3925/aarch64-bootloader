@@ -9,13 +9,13 @@ use aarch64_cpu::registers::{MAIR_EL1, TCR_EL1, TCR2_EL1, TTBR1_EL1};
 use aarch64_vmsa::address::{GranuleKind, Level, TranslationGranule};
 use aarch64_vmsa::arch::{Capability, VmsaFeatures};
 use aarch64_vmsa::attrs::{
-    AllocationHints, CachePolicy, Cacheability, DataAccess, DeviceMemoryType, DirtyBitManagement,
+    AllocationHints, CachePolicy, Cacheability, DataRights, DeviceMemoryType, DirtyBitManagement,
     DirtyControl, MemoryAttributes, MemoryTransience, SemanticLeafAttrs, SemanticTableAttrs,
     SemanticVmsa64Stage1LeafControls, SemanticVmsa64Stage1TableControls, Shareability,
-    SoftwareMetadata, Stage1EffectivePermissions, Stage1MemoryConfig, Stage1PermissionConfig,
-    TwoPrivilegeTablePermissionLimits,
+    SoftwareMetadata, Stage1MemoryConfig, Stage1PermissionConfig, Stage1Permissions,
+    TwoPrivilegeTableRestrictions,
 };
-use aarch64_vmsa::config::format::{Vmsa64, Vmsa64Lpa2, Vmsa128};
+use aarch64_vmsa::config::format::{NativeEndian, Vmsa64 as GenericVmsa64, Vmsa64Lpa2, Vmsa128};
 use aarch64_vmsa::config::regime::NonSecureEl1Stage1;
 use aarch64_vmsa::descriptor::{DescriptorFormat, HasLayout, SupportsLiveDescriptorIo};
 use aarch64_vmsa::mapper::{Live, Mapper, MapperInvalidation, Offline};
@@ -30,6 +30,8 @@ use uefi::boot::{self, AllocateType};
 use uefi::mem::memory_map::MemoryType;
 
 use crate::kernel_loading::SegmentPerms;
+
+pub type Vmsa64 = GenericVmsa64<NativeEndian>;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MapperError {
@@ -501,18 +503,18 @@ where
                     MemoryAttributes::Device(DeviceMemoryType::NonGatheringNonReorderingNoEarlyAck)
                 }
             },
-            permissions: Stage1EffectivePermissions {
-                privileged_data: if perms.write {
-                    DataAccess::ReadWrite
+            permissions: Stage1Permissions::new(
+                if perms.write {
+                    DataRights::ReadWrite
                 } else {
-                    DataAccess::ReadOnly
+                    DataRights::Read
                 },
-                unprivileged_data: DataAccess::None,
-                privileged_execute: perms.execute,
-                unprivileged_execute: false,
-                privileged_gcs: false,
-                unprivileged_gcs: false,
-            },
+                DataRights::None,
+                perms.execute,
+                false,
+                false,
+                false,
+            ),
             pas: (),
             controls: SemanticVmsa64Stage1LeafControls {
                 shareability: match kind {
@@ -528,9 +530,9 @@ where
             },
         };
         let table = SemanticTableAttrs::<Vmsa64, NonSecureEl1Stage1> {
-            permission_limits: TwoPrivilegeTablePermissionLimits {
-                privileged_data_limit: DataAccess::ReadWrite,
-                unprivileged_data_limit: DataAccess::ReadWrite,
+            restrictions: TwoPrivilegeTableRestrictions {
+                privileged_data_limit: DataRights::ReadWrite,
+                unprivileged_data_limit: DataRights::ReadWrite,
                 privileged_execute_limit: true,
                 unprivileged_execute_limit: false,
             },

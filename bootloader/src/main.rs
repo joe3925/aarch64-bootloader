@@ -10,16 +10,16 @@ pub mod mapper;
 use crate::file::read_file;
 use crate::kernel_loading::SegmentPerms;
 use crate::kernel_loading::{load_kernel_at_preferred_virtual_address, validate_kernel};
+use crate::mapper::Vmsa64;
 use crate::mapper::{
     BootConfig as MapperConfig, BootMapperInvalidation, BootPlanner, UnavailableTableProvider,
 };
 use aarch64_cpu::registers::{MAIR_EL1, TCR_EL1, TTBR1_EL1};
 use aarch64_vmsa::address::{TranslationGranule, VirtAddr};
-use aarch64_vmsa::config::format::Vmsa64;
 use aarch64_vmsa::config::granule::Granule4KiB;
 use bootloader_api::cfg::{CfgFile, FromCfg};
 use bootloader_api::{
-    BootConfig, BootInfo, MemoryMap as BootMemoryMap, Optional, TranslationInfo,
+    BootConfig, BootInfo, KernelSections, MemoryMap as BootMemoryMap, Optional, TranslationInfo,
 };
 use core::arch::asm;
 use core::ffi::c_void;
@@ -107,12 +107,9 @@ fn init() -> Result<(), BootError> {
         6 => 52,
         _ => return Err(BootError::MapperInit),
     };
-    let mut mapper = BootPlanner::<Vmsa64, Granule4KiB>::new(
-        MapperConfig::default(),
-        48,
-        output_addr_bits,
-    )
-        .map_err(|_| BootError::MapperInit)?;
+    let mut mapper =
+        BootPlanner::<Vmsa64, Granule4KiB>::new(MapperConfig::default(), 48, output_addr_bits)
+            .map_err(|_| BootError::MapperInit)?;
     let (mapping, mapping_config) = mapper.mapping_parts_mut();
     let loaded_kernel =
         load_kernel_at_preferred_virtual_address(&kernel, &kernel_binary, mapping, mapping_config)
@@ -215,7 +212,10 @@ fn init() -> Result<(), BootError> {
     .map_err(|_| BootError::RecursiveMapping)?;
     let scratch_descriptor = recursive_descriptor(recursive_base, SCRATCH_PAGE);
     unsafe {
-        asm!("msr daifset, #0xf", options(nomem, nostack, preserves_flags));
+        asm!(
+            "msr daifset, #0xf",
+            options(nomem, nostack, preserves_flags)
+        );
     }
     let memory_map = unsafe { boot::exit_boot_services(Some(MemoryType::LOADER_DATA)) };
     let meta = memory_map.meta();
@@ -232,7 +232,11 @@ fn init() -> Result<(), BootError> {
     core::mem::forget(memory_map);
 
     let _online_mapper = match unsafe {
-        mapper.install(recursive_access, UnavailableTableProvider, BootMapperInvalidation)
+        mapper.install(
+            recursive_access,
+            UnavailableTableProvider,
+            BootMapperInvalidation,
+        )
     } {
         Ok(mapper) => mapper,
         Err(_) => {
@@ -251,6 +255,12 @@ fn init() -> Result<(), BootError> {
         stub_entry: loaded_kernel.virt_entry,
         stub_virt_base: loaded_kernel.virt_base,
         stub_virt_size: loaded_kernel.virt_size,
+        stub_sections: unsafe {
+            KernelSections::from_raw_parts(
+                loaded_kernel.segments.as_ptr(),
+                loaded_kernel.segments.len(),
+            )
+        },
         translation: TranslationInfo {
             root_table,
             recursive_base,

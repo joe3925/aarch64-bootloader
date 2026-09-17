@@ -1,17 +1,18 @@
 extern crate alloc;
 
+use crate::mapper::Vmsa64;
 use crate::mapper::{MapperError, MappingPrimitive};
 use aarch64_vmsa::address::TranslationGranule;
 use aarch64_vmsa::attrs::{Stage1MemoryConfig, Stage1PermissionConfig};
-use aarch64_vmsa::config::format::Vmsa64;
 use aarch64_vmsa::config::regime::NonSecureEl1Stage1;
 use aarch64_vmsa::descriptor::HasLayout;
 use aarch64_vmsa::mapper::Offline;
 use aarch64_vmsa::table::{TableAccessMut, TableFrameProvider};
 use alloc::vec::Vec;
+use bootloader_api::KernelSection;
+use core::arch::asm;
 use core::cmp;
 use core::ptr;
-use core::arch::asm;
 use goblin::elf::Elf;
 use goblin::elf::program_header;
 use goblin::elf64::header;
@@ -31,19 +32,11 @@ pub struct SegmentPerms {
 }
 
 #[derive(Clone, Debug)]
-pub struct LoadedSegment {
-    pub virt_start: u64,
-    pub phys_start: u64,
-    pub byte_len: u64,
-    pub perms: SegmentPerms,
-}
-
-#[derive(Clone, Debug)]
 pub struct LoadedKernel {
     pub virt_entry: u64,
     pub virt_base: u64,
     pub virt_size: u64,
-    pub segments: Vec<LoadedSegment>,
+    pub segments: Vec<KernelSection>,
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum KernelLoadError<MapError> {
@@ -185,11 +178,17 @@ where
             )
             .map_err(KernelLoadError::MappingFailed)?;
 
-        segments.push(LoadedSegment {
-            virt_start: virt_page,
-            phys_start: phys_page,
-            byte_len: mapped_size,
-            perms,
+        segments.push(KernelSection {
+            name: [0; 8],
+            virtual_address: u32::try_from(virt_page.saturating_sub(virt_base)).unwrap_or(0),
+            virtual_size: u32::try_from(mapped_size)
+                .map_err(|_| KernelLoadError::InvalidSegmentRange)?,
+            raw_offset: u32::try_from(ph.p_offset)
+                .map_err(|_| KernelLoadError::InvalidSegmentOffset)?,
+            raw_size: u32::try_from(ph.p_filesz)
+                .map_err(|_| KernelLoadError::InvalidSegmentSize)?,
+            characteristics: ph.p_flags,
+            loaded_address: virt_page,
         });
 
         virt_base = cmp::min(virt_base, virt_page);
@@ -225,19 +224,20 @@ fn segment_perms(flags: u32) -> SegmentPerms {
     }
 }
 
-fn mapped_range_overlaps(segments: &[LoadedSegment], virt_start: u64, byte_len: u64) -> bool {
+fn mapped_range_overlaps(segments: &[KernelSection], virt_start: u64, byte_len: u64) -> bool {
     let virt_end = match virt_start.checked_add(byte_len) {
         Some(end) => end,
         None => return true,
     };
 
-    for segment in segments {
-        let seg_end = match segment.virt_start.checked_add(segment.byte_len) {
+    for section in segments {
+        let seg_start = section.loaded_address;
+        let seg_end = match seg_start.checked_add(section.virtual_size as u64) {
             Some(end) => end,
             None => return true,
         };
 
-        if virt_start < seg_end && segment.virt_start < virt_end {
+        if virt_start < seg_end && seg_start < virt_end {
             return true;
         }
     }

@@ -4,10 +4,85 @@
 pub mod cfg;
 pub mod framebuffer;
 
+use core::ops;
+use core::slice;
+
 use crate::cfg::CfgFile;
 use crate::cfg::FromCfg;
 pub use crate::framebuffer::{FrameBuffer, FrameBufferConfig, FrameBufferInfo, PixelFormat};
 pub use aarch64_vmsa::address::GranuleKind;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(C)]
+pub struct KernelTextSection {
+    pub base: u64,
+    pub size: u64,
+}
+
+#[derive(Debug)]
+#[repr(C)]
+pub struct KernelSections {
+    ptr: *const KernelSection,
+    len: usize,
+}
+
+impl KernelSections {
+    pub const unsafe fn from_raw_parts(ptr: *const KernelSection, len: usize) -> Self {
+        Self { ptr, len }
+    }
+
+    pub const fn as_ptr(&self) -> *const KernelSection {
+        self.ptr
+    }
+
+    pub const fn len(&self) -> usize {
+        self.len
+    }
+
+    pub const fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    pub fn as_slice(&self) -> &[KernelSection] {
+        if self.len == 0 {
+            return &[];
+        }
+        unsafe { slice::from_raw_parts(self.ptr, self.len) }
+    }
+}
+
+impl ops::Deref for KernelSections {
+    type Target = [KernelSection];
+
+    fn deref(&self) -> &Self::Target {
+        self.as_slice()
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+#[repr(C)]
+pub struct KernelSection {
+    pub name: [u8; 8],
+    pub virtual_address: u32,
+    pub virtual_size: u32,
+    pub raw_offset: u32,
+    pub raw_size: u32,
+    pub characteristics: u32,
+    pub loaded_address: u64,
+}
+
+impl KernelSection {
+    pub const fn empty() -> Self {
+        Self {
+            name: [0; 8],
+            virtual_address: 0,
+            virtual_size: 0,
+            raw_offset: 0,
+            raw_size: 0,
+            characteristics: 0,
+            loaded_address: 0,
+        }
+    }
+}
 
 #[derive(Debug)]
 #[repr(C)]
@@ -19,6 +94,7 @@ pub struct BootInfo {
     pub stub_entry: u64,
     pub stub_virt_base: u64,
     pub stub_virt_size: u64,
+    pub stub_sections: KernelSections,
     pub translation: TranslationInfo,
 }
 
