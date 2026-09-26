@@ -16,7 +16,7 @@ use crate::mapper::{
     UnavailableTableProvider,
 };
 use aarch64_cpu::registers::{MAIR_EL1, TCR_EL1, TTBR1_EL1};
-use aarch64_vmsa::address::TranslationGranule;
+use aarch64_vmsa::address::{ArmTranslationGranule, TranslationGranule};
 use aarch64_vmsa::config::granule::Granule4KiB;
 use bootloader_api::cfg::{CfgFile, FromCfg};
 use bootloader_api::{

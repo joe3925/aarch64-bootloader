@@ -6,8 +6,8 @@ use core::ptr::NonNull;
 
 use aarch64_cpu::asm::barrier::{ISH, ISHST, SY, dsb, isb};
 use aarch64_cpu::registers::{MAIR_EL1, TCR_EL1, TCR2_EL1, TTBR1_EL1};
-use aarch64_vmsa::address::{GranuleKind, Level, TranslationGranule};
-use aarch64_vmsa::arch::{Capability, VmsaFeatures};
+use aarch64_vmsa::address::{ArmTranslationGranule, GranuleKind, Level, TranslationGranule};
+use aarch64_vmsa::arch::VmsaFeatures;
 use aarch64_vmsa::attrs::{
     AllocationHints, CachePolicy, Cacheability, DataRights, DeviceMemoryType, DirtyBitManagement,
     DirtyControl, MemoryAttributes, MemoryTransience, SemanticLeafAttrs, SemanticTableAttrs,
@@ -24,7 +24,7 @@ use aarch64_vmsa::table::{
     TableAllocLayout, TableFrameProvider, TableGeometry, TableReclaim, TableShape,
     TranslationTable, TranslationTableMut,
 };
-use aarch64_vmsa::translation::{WalkInputAddr, WalkOutputAddr};
+use aarch64_vmsa::translation::{Stage1, WalkOutputAddr, from_canonical};
 use tock_registers::interfaces::{Readable, Writeable};
 use uefi::boot::{self, AllocateType};
 use uefi::mem::memory_map::MemoryType;
@@ -207,7 +207,7 @@ unsafe impl<G: TranslationGranule> TableFrameProvider<G> for UefiTablePool<G> {
 
 pub struct MappingPrimitive<F, G, A, P, M>
 where
-    F: DescriptorFormat,
+    F: DescriptorFormat + HasLayout<Stage1, G>,
     G: TranslationGranule,
 {
     inner: Mapper<F, NonSecureEl1Stage1, G, A, P, M>,
@@ -215,7 +215,7 @@ where
 
 impl<F, G, A, P, M> core::ops::Deref for MappingPrimitive<F, G, A, P, M>
 where
-    F: DescriptorFormat,
+    F: DescriptorFormat + HasLayout<Stage1, G>,
     G: TranslationGranule,
 {
     type Target = Mapper<F, NonSecureEl1Stage1, G, A, P, M>;
@@ -226,7 +226,7 @@ where
 
 impl<F, G, A, P, M> core::ops::DerefMut for MappingPrimitive<F, G, A, P, M>
 where
-    F: DescriptorFormat,
+    F: DescriptorFormat + HasLayout<Stage1, G>,
     G: TranslationGranule,
 {
     fn deref_mut(&mut self) -> &mut Self::Target {
@@ -263,7 +263,7 @@ where
     G: TranslationGranule,
     A: TableAccessMut<F, G>,
     P: TableFrameProvider<G>,
-    I: MapperInvalidation<F, G>,
+    I: MapperInvalidation<F, NonSecureEl1Stage1, G>,
 {
     pub fn create_online(
         root: RootTable<F, NonSecureEl1Stage1, G>,
@@ -277,8 +277,8 @@ where
 
 pub struct BootPlanner<F, G, C = BootConfig>
 where
-    F: DescriptorFormat,
-    G: TranslationGranule,
+    F: DescriptorFormat + HasLayout<Stage1, G>,
+    G: ArmTranslationGranule,
 {
     mapper: MappingPrimitive<F, G, IdentityTableAccess<F, G>, UefiTablePool<G>, Offline>,
     config: C,
@@ -363,7 +363,7 @@ where
         F: SupportsLiveDescriptorIo + InstallableDescriptorFormat,
         A: TableAccessMut<F, G>,
         P: TableFrameProvider<G>,
-        I: MapperInvalidation<F, G>,
+        I: MapperInvalidation<F, NonSecureEl1Stage1, G>,
         C: BootTranslationConfig,
     {
         let features = VmsaFeatures::current();
@@ -432,7 +432,9 @@ where
 }
 
 pub struct BootMapperInvalidation;
-unsafe impl<G: TranslationGranule> MapperInvalidation<Vmsa64, G> for BootMapperInvalidation {
+unsafe impl<G: TranslationGranule> MapperInvalidation<Vmsa64, NonSecureEl1Stage1, G>
+    for BootMapperInvalidation
+{
     fn leaf_inserted(&mut self, _: TableAccessLocation<Vmsa64, G>, _: usize, _: u64, _: u64) {}
     fn leaf_removed(&mut self, _: TableAccessLocation<Vmsa64, G>, _: usize, _: u64) {}
     fn table_descriptor_inserted(
@@ -575,9 +577,8 @@ where
         };
         let mut off = 0;
         while off < byte_len {
-            let input =
-                WalkInputAddr::from_canonical(virt_start + off, self.inner.root().addr_bits())
-                    .map_err(|_| MapperError::InvalidInputAddress)?;
+            let input = from_canonical(virt_start + off, self.inner.root().addr_bits())
+                .map_err(|_| MapperError::InvalidInputAddress)?;
             self.inner
                 .map_semantic_leaf(
                     config,
