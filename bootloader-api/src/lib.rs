@@ -109,8 +109,8 @@ pub enum Optional<T> {
 #[repr(C)]
 pub struct TranslationInfo {
     pub root_table: u64,
-    pub recursive_base: u64,
-    pub recursive_index: usize,
+    pub physical_memory_offset: u64,
+    pub physical_memory_len: u64,
     pub input_addr_bits: u8,
     pub output_addr_bits: u8,
     pub granule_kind: GranuleKind,
@@ -118,8 +118,6 @@ pub struct TranslationInfo {
     pub tcr_el1: u64,
     pub tcr2_el1: u64,
     pub ttbr1_el1: u64,
-    pub scratch_page: u64,
-    pub scratch_descriptor: *mut u64,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -219,6 +217,12 @@ pub struct UefiMemoryDescriptor {
 pub struct BootConfig<'a> {
     pub kernel: &'a str,
     pub framebuffer: FrameBufferConfig,
+    pub physical_memory: PhysicalMemoryMapping,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PhysicalMemoryMapping {
+    Dynamic,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -228,6 +232,8 @@ pub enum BootConfigError {
     InvalidFramebufferWidth,
     MissingFramebufferHeight,
     InvalidFramebufferHeight,
+    MissingPhysicalMemory,
+    InvalidPhysicalMemory,
 }
 
 impl<'a> FromCfg<'a> for BootConfig<'a> {
@@ -245,6 +251,13 @@ impl<'a> FromCfg<'a> for BootConfig<'a> {
             .ok_or(BootConfigError::MissingFramebufferHeight)?
             .parse()
             .map_err(|_| BootConfigError::InvalidFramebufferHeight)?;
+        let physical_memory = match cfg
+            .get("physical_memory")
+            .ok_or(BootConfigError::MissingPhysicalMemory)?
+        {
+            "dynamic" => PhysicalMemoryMapping::Dynamic,
+            _ => return Err(BootConfigError::InvalidPhysicalMemory),
+        };
 
         Ok(Self {
             kernel,
@@ -252,6 +265,7 @@ impl<'a> FromCfg<'a> for BootConfig<'a> {
                 minimum_width: Some(framebuffer_width),
                 minimum_height: Some(framebuffer_height),
             },
+            physical_memory,
         })
     }
 }
@@ -263,7 +277,7 @@ mod tests {
     #[test]
     fn parses_framebuffer_dimensions() {
         let cfg = CfgFile::parse(
-            b"kernel=/kernel.elf\nframebuffer_width=1920\nframebuffer_height=1080\n",
+            b"kernel=/kernel.elf\nframebuffer_width=1920\nframebuffer_height=1080\nphysical_memory=dynamic\n",
         )
         .unwrap();
 
@@ -277,7 +291,7 @@ mod tests {
     #[test]
     fn rejects_invalid_framebuffer_dimensions() {
         let cfg = CfgFile::parse(
-            b"kernel=/kernel.elf\nframebuffer_width=wide\nframebuffer_height=1080\n",
+            b"kernel=/kernel.elf\nframebuffer_width=wide\nframebuffer_height=1080\nphysical_memory=dynamic\n",
         )
         .unwrap();
 

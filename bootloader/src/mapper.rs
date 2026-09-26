@@ -51,6 +51,67 @@ pub enum MappingKind {
 
 pub struct IdentityTableAccess<F: DescriptorFormat, G: TranslationGranule>(PhantomData<(F, G)>);
 
+pub struct OffsetTableAccess {
+    offset: u64,
+    len: u64,
+}
+
+impl OffsetTableAccess {
+    pub const fn new(offset: u64, len: u64) -> Self {
+        Self { offset, len }
+    }
+
+    fn pointer<F: DescriptorFormat, G: TranslationGranule>(
+        &self,
+        location: TableAccessLocation<'_, F, G>,
+    ) -> Result<NonNull<F::Raw>, MapperError> {
+        let bytes = location
+            .shape()
+            .alloc_layout()
+            .map_err(|_| MapperError::InvalidGeometry)?
+            .bytes();
+        let end = location
+            .addr()
+            .raw()
+            .checked_add(bytes)
+            .ok_or(MapperError::InvalidGeometry)?;
+        if end > self.len {
+            return Err(MapperError::InvalidGeometry);
+        }
+        let address = self
+            .offset
+            .checked_add(location.addr().raw())
+            .ok_or(MapperError::InvalidGeometry)?;
+        NonNull::new(address as *mut F::Raw).ok_or(MapperError::NullTable)
+    }
+}
+
+unsafe impl<F: DescriptorFormat, G: TranslationGranule> TableAccess<F, G>
+    for OffsetTableAccess
+{
+    type Error = MapperError;
+
+    fn table_at<'a>(
+        &'a self,
+        location: TableAccessLocation<'a, F, G>,
+    ) -> Result<TranslationTable<'a, F, G>, Self::Error> {
+        let pointer = self.pointer(location)?;
+        Ok(unsafe { TranslationTable::from_raw_parts(pointer, location.shape()) })
+    }
+}
+
+unsafe impl<F: DescriptorFormat, G: TranslationGranule> TableAccessMut<F, G>
+    for OffsetTableAccess
+{
+    fn table_at_mut<'a>(
+        &'a mut self,
+        location: TableAccessLocation<'a, F, G>,
+    ) -> Result<TranslationTableMut<'a, F, G>, Self::Error> {
+        let pointer = self.pointer(location)?;
+        Ok(unsafe { TranslationTableMut::from_raw_parts(pointer, location.shape()) })
+    }
+}
+
 impl<F: DescriptorFormat, G: TranslationGranule> IdentityTableAccess<F, G> {
     pub const fn new() -> Self {
         Self(PhantomData)
@@ -441,36 +502,6 @@ where
     P: TableFrameProvider<G>,
     Vmsa64: HasLayout<<NonSecureEl1Stage1 as aarch64_vmsa::regime::TranslationRegime>::Stage, G>,
 {
-    pub fn install_recursive_mapping(&mut self, index: usize) -> Result<u64, MapperError> {
-        let root = self.root();
-        if index >= TableGeometry::<Vmsa64, G>::entries() {
-            return Err(MapperError::InvalidGeometry);
-        }
-        let mut base = 0u64;
-        let mut level = root.level();
-        loop {
-            base |= (index as u64) << TableGeometry::<Vmsa64, G>::level_shift(level);
-            if level == Vmsa64::FINAL_LEVEL {
-                break;
-            }
-            level = level.next();
-        }
-        let sign_bit = 1u64 << (root.addr_bits() - 1);
-        if base & sign_bit != 0 {
-            base |= !((1u64 << root.addr_bits()) - 1);
-        }
-        let root_entry = unsafe { (root.addr().raw() as *const u64).add(index).read_volatile() };
-        if root_entry != Vmsa64::invalid() {
-            return Err(MapperError::InvalidGeometry);
-        }
-        unsafe {
-            (root.addr().raw() as *mut u64)
-                .add(index)
-                .write_volatile(root.addr().raw() | 0b11 | (3 << 2) | (3 << 8) | (1 << 10))
-        };
-        Ok(base)
-    }
-
     pub fn map_kernel_range<C>(
         &mut self,
         config: &C,

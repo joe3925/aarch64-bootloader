@@ -12,14 +12,16 @@ use crate::kernel_loading::SegmentPerms;
 use crate::kernel_loading::{load_kernel_at_preferred_virtual_address, validate_kernel};
 use crate::mapper::Vmsa64;
 use crate::mapper::{
-    BootConfig as MapperConfig, BootMapperInvalidation, BootPlanner, UnavailableTableProvider,
+    BootConfig as MapperConfig, BootMapperInvalidation, BootPlanner, OffsetTableAccess,
+    UnavailableTableProvider,
 };
 use aarch64_cpu::registers::{MAIR_EL1, TCR_EL1, TTBR1_EL1};
-use aarch64_vmsa::address::{TranslationGranule, VirtAddr};
+use aarch64_vmsa::address::TranslationGranule;
 use aarch64_vmsa::config::granule::Granule4KiB;
 use bootloader_api::cfg::{CfgFile, FromCfg};
 use bootloader_api::{
-    BootConfig, BootInfo, KernelSections, MemoryMap as BootMemoryMap, Optional, TranslationInfo,
+    BootConfig, BootInfo, KernelSections, MemoryMap as BootMemoryMap, Optional,
+    PhysicalMemoryMapping, TranslationInfo,
 };
 use core::arch::asm;
 use core::ffi::c_void;
@@ -39,8 +41,8 @@ use uefi::table::cfg::ConfigTableEntry;
 
 const CFG_PATH: &str = env!("RUSTOS_BOOT_CONFIG_PATH");
 const EFI_DTB_TABLE_GUID: Guid = guid!("b1b621d5-f19c-41a5-830b-d9152c69aae0");
-const RECURSIVE_INDEX: usize = 510;
-const SCRATCH_PAGE: u64 = 0xFFFF_8300_0000_0000;
+const PHYSICAL_MEMORY_OFFSET: u64 = 0xFFFF_4000_0000_0000;
+const KERNEL_SPACE_BASE: u64 = 0xFFFF_8000_0000_0000;
 #[entry]
 fn main() -> Status {
     match init() {
@@ -87,6 +89,9 @@ fn init() -> Result<(), BootError> {
     let cfg_file = read_file(CFG_PATH, &mut fs).map_err(|_| BootError::CfgRead)?;
     let cfg = CfgFile::parse(&cfg_file).map_err(|_| BootError::CfgParse)?;
     let boot_cfg = BootConfig::from_cfg(&cfg).map_err(|_| BootError::BootConfig)?;
+    let physical_memory_offset = match boot_cfg.physical_memory {
+        PhysicalMemoryMapping::Dynamic => PHYSICAL_MEMORY_OFFSET,
+    };
     let framebuffer = match framebuffer::framebuffer(&boot_cfg.framebuffer) {
         Ok(framebuffer) => Optional::Some(framebuffer),
         Err(_) => Optional::None,
@@ -168,23 +173,34 @@ fn init() -> Result<(), BootError> {
             data_permissions(),
         )?;
     }
-    let recursive_base = mapper
-        .mapping_parts_mut()
-        .0
-        .install_recursive_mapping(RECURSIVE_INDEX)
-        .map_err(|_| BootError::RecursiveMapping)?;
     let root = mapper.root();
     let root_table = root.addr().raw();
     let input_addr_bits = root.addr_bits();
     let output_addr_bits = root.output_addr_bits();
+    let physical_memory_len = memory_map
+        .entries()
+        .filter_map(|descriptor| {
+            descriptor
+                .page_count
+                .checked_mul(boot::PAGE_SIZE as u64)
+                .and_then(|len| descriptor.phys_start.checked_add(len))
+        })
+        .max()
+        .ok_or(BootError::TransitionMapping)?;
+    let physical_memory_end = physical_memory_offset
+        .checked_add(physical_memory_len)
+        .ok_or(BootError::TransitionMapping)?;
+    if physical_memory_end > KERNEL_SPACE_BASE {
+        return Err(BootError::TransitionMapping);
+    }
     mapper
         .mapping_parts_mut()
         .0
         .map_kernel_range(
             &MapperConfig::default(),
-            SCRATCH_PAGE,
-            root_table,
-            Granule4KiB::SIZE,
+            physical_memory_offset,
+            0,
+            physical_memory_len,
             data_permissions(),
             crate::mapper::MappingKind::Normal,
         )
@@ -201,16 +217,6 @@ fn init() -> Result<(), BootError> {
             crate::mapper::MappingKind::Device,
         )
         .map_err(|_| BootError::TransitionMapping)?;
-    let recursive_access = unsafe {
-        aarch64_vmsa::table::RecursiveTableAccess::<Vmsa64, Granule4KiB>::new(
-            RECURSIVE_INDEX,
-            VirtAddr(recursive_base),
-            root.addr(),
-            root.level(),
-        )
-    }
-    .map_err(|_| BootError::RecursiveMapping)?;
-    let scratch_descriptor = recursive_descriptor(recursive_base, SCRATCH_PAGE);
     unsafe {
         asm!(
             "msr daifset, #0xf",
@@ -233,7 +239,7 @@ fn init() -> Result<(), BootError> {
 
     let _online_mapper = match unsafe {
         mapper.install(
-            recursive_access,
+            OffsetTableAccess::new(physical_memory_offset, physical_memory_len),
             UnavailableTableProvider,
             BootMapperInvalidation,
         )
@@ -263,8 +269,8 @@ fn init() -> Result<(), BootError> {
         },
         translation: TranslationInfo {
             root_table,
-            recursive_base,
-            recursive_index: RECURSIVE_INDEX,
+            physical_memory_offset,
+            physical_memory_len,
             input_addr_bits,
             output_addr_bits,
             granule_kind: Granule4KiB::KIND,
@@ -272,8 +278,6 @@ fn init() -> Result<(), BootError> {
             tcr_el1: TCR_EL1.get(),
             tcr2_el1,
             ttbr1_el1: TTBR1_EL1.get(),
-            scratch_page: SCRATCH_PAGE,
-            scratch_descriptor: scratch_descriptor as *mut u64,
         },
     };
     unsafe {
@@ -296,19 +300,6 @@ pub(crate) fn debug_message(message: &str) {
             uart.write_volatile(byte as u32);
         }
     }
-}
-
-fn recursive_descriptor(recursive_base: u64, virtual_address: u64) -> u64 {
-    let index_mask = 0x1ff;
-    let l0 = (virtual_address >> 39) & index_mask;
-    let l1 = (virtual_address >> 30) & index_mask;
-    let l2 = (virtual_address >> 21) & index_mask;
-    let l3 = (virtual_address >> 12) & index_mask;
-    (recursive_base & 0xffff_ff80_0000_0000)
-        | (l0 << 30)
-        | (l1 << 21)
-        | (l2 << 12)
-        | (l3 * core::mem::size_of::<u64>() as u64)
 }
 
 unsafe fn enter_stub(
@@ -401,7 +392,6 @@ enum BootError {
     MapperInit,
     LoadedImage,
     TransitionMapping,
-    RecursiveMapping,
     MapperInstall,
 }
 
@@ -420,7 +410,6 @@ impl BootError {
             Self::MapperInit => Status::OUT_OF_RESOURCES,
             Self::LoadedImage => Status::LOAD_ERROR,
             Self::TransitionMapping => Status::LOAD_ERROR,
-            Self::RecursiveMapping => Status::LOAD_ERROR,
             Self::MapperInstall => Status::LOAD_ERROR,
         }
     }
